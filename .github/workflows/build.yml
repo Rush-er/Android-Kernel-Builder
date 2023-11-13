@@ -67,6 +67,9 @@ jobs:
       # Whether to enable KernelSU
       ENABLE_KERNELSU: ${{ matrix.CONFIG.enableKernelSU }}
 
+      # Whether to enable LXC docker
+      ENABLE_LXC: ${{ matrix.CONFIG.enableLXC }}
+
       # Set output & ccache directory
       OUT_DIR: "${{ github.workspace }}/out"
       CCACHE_DIR: "${{ github.workspace }}/out"
@@ -76,6 +79,10 @@ jobs:
         uses: pierotofy/set-swap-space@master
         with:
           swap-size-gb: 10
+
+      # This action checks-out your CONFIGSitory under $GITHUB_WORKSPACE, so your workflow can access it.
+      - name: 😄 Checkout
+        uses: actions/checkout@v4
 
       # Install prerequisites for Ubuntu
       - name: ⭐ Install prerequisites
@@ -122,7 +129,7 @@ jobs:
       - name: 🌟 Clone kernel source => (${{ env.KERNEL_REPO }})
         run: |
           git clone --recursive --depth=1 -j $(nproc) --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_REPO }} ${{ env.KERNEL_NAME }}
-          tree ${{ env.KERNEL_NAME }}
+          # tree ${{ env.KERNEL_NAME }}
 
       - name: 💫 Get toolchains
         env:
@@ -243,6 +250,51 @@ jobs:
 
           cat arch/${{ env.ARCH }}/configs/${{ env.KERNEL_DEFCONFIG_PATH }}
 
+      - name: 😋 Setup LXC docker
+        working-directory: ${{ env.KERNEL_NAME }}
+        env:
+          DEFCONFIG: ${{ env.WORKSPACE }}/${{ env.KERNEL_NAME }}/arch/${{ steps.generate-args.outputs.ARCH }}/configs/${{env.KERNEL_DEFCONFIG_PATH}}
+          ADD_DEFCONFIG: ${{ env.WORKSPACE }}/LXC/LXC_defconfig
+        if: ${{ env.ENABLE_LXC == 'true' }}
+        run: |
+          # Add configuration
+          # python ${{ env.WORKSPACE }}/LXC/Config.py -w ${{ env.DEFCONFIG }}
+          for config in $(cat ${{ env.ADD_DEFCONFIG }})
+          do
+            echo $i >> ${{ env.DEFCONFIG }}
+          done
+
+          # Apply patch
+          if [ -f kernel/cgroup.c ]; then
+            row=$(sed -n -e '/^static int cgroup_add_file/=' kernel/cgroup.c)
+            touch /tmp/tmp.txt
+            sed -n -e '/static int cgroup_add_file/,/return 0/p' kernel/cgroup.c >> /tmp/tmp.txt
+            row2=$(sed -n -e '/return 0/=' /tmp/tmp.txt)
+            row3=$(echo `expr $row + $row2 - 1`)
+            sed -i "$row3 i\        }" kernel/cgroup.c
+            sed -i "$row3 i\                kernfs_create_link(cgrp->kn, name, kn);" kernel/cgroup.c
+            sed -i "$row3 i\                snprintf(name, CGROUP_FILE_NAME_MAX, \"%s.%s\", cft->ss->name, cft->name);" kernel/cgroup.c
+            sed -i "$row3 i\        if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {" kernel/cgroup.c
+            echo "🎖️ Apply xt_qtaguid.patch => (kernel/cgroup.c)"
+          fi
+          if [ -f kernel/cgroup/cgroup.c ]; then
+            row=$(sed -n -e '/^static int cgroup_add_file/=' kernel/cgroup/cgroup.c)
+            touch /tmp/tmp.txt
+            sed -n -e '/static int cgroup_add_file/,/return 0/p' kernel/cgroup/cgroup.c >> /tmp/tmp.txt
+            row2=$(sed -n -e '/return 0/=' /tmp/tmp.txt)
+            row3=$(echo `expr $row + $row2 - 1`)
+            sed -i "$row3 i\        }" kernel/cgroup/cgroup.c
+            sed -i "$row3 i\                kernfs_create_link(cgrp->kn, name, kn);" kernel/cgroup/cgroup.c
+            sed -i "$row3 i\                snprintf(name, CGROUP_FILE_NAME_MAX, \"%s.%s\", cft->ss->name, cft->name);" kernel/cgroup/cgroup.c
+            sed -i "$row3 i\        if (cft->ss && (cgrp->root->flags & CGRP_ROOT_NOPREFIX) && !(cft->flags & CFTYPE_NO_PREFIX)) {" kernel/cgroup/cgroup.c
+            echo "🎖️ Apply xt_qtaguid.patch => (kernel/cgroup/cgroup.c)"
+          fi
+          if [ -f android-kernel/net/netfilter/xt_qtaguid.c ]; then
+            git am -s < ${{ env.WORKSPACE }}/LXC/Patches/xt_qtaguid.patch
+            echo "🎖️ Apply xt_qtaguid.patch"
+          fi
+          # sed -i '/CONFIG_ANDROID_PARANOID_NETWORK/d' ${{ env.DEFCONFIG }}
+
       - name: 👍 Start building the kernel
         working-directory: ${{ env.KERNEL_NAME }}
         env:
@@ -307,9 +359,11 @@ jobs:
 
       - name: ☢️ Upload output directory
         uses: actions/upload-artifact@v3
+        env:
+          ARCH: ${{ steps.generate-args.outputs.ARCH }}
         with:
           name: ${{ env.KERNEL_NAME }}-${{ env.BUILD_DATE }}-Output
-          path: ${{ env.OUT_DIR }}/
+          path: ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/
           retention-days: 7
 
       - name: ⏰ Pack Anykernel3
@@ -334,20 +388,21 @@ jobs:
           fi
 
 
-          if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
-            cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image ./AnyKernel3/
-          fi
-          if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz" ]; then
-            cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz ./AnyKernel3/
-          fi
           if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb" ]; then
             cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz-dtb ./AnyKernel3/
-          fi
-          if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo" ]; then
-            cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo ./AnyKernel3/
-          fi
-          if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" ]; then
-            cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img ./AnyKernel3/
+          else
+            if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image" ]; then
+              cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image ./AnyKernel3/
+            fi
+            if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz" ]; then
+              cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz ./AnyKernel3/
+            fi
+            if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo" ]; then
+              cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo ./AnyKernel3/
+            fi
+            if [ -e "${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img" ]; then
+              cp -f ${{ env.OUT_DIR }}/arch/${{ env.ARCH }}/boot/dtbo.img ./AnyKernel3/
+            fi
           fi
 
           cd AnyKernel3/
